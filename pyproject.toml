@@ -1,0 +1,16 @@
+[project]
+name = "gcode-cli"
+version = "0.1.0"
+description = "Tiny agentic coding CLI on the OpenAI API, with built-in token/cost tracking"
+requires-python = ">=3.9"
+dependencies = ["openai>=1.40"]
+
+[project.scripts]
+gcode = "gcode:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["gcode"]
