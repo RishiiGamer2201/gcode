@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 
+import openai
 from openai import OpenAI
 
 ENV_FILES = [pathlib.Path.cwd() / ".env", pathlib.Path(__file__).resolve().parent / ".env"]
@@ -46,20 +47,29 @@ def num_env(name, default=0.0):
 
 HOME = pathlib.Path(os.environ.get("GCODE_HOME", pathlib.Path.home() / ".gcode"))
 USAGE_LOG = HOME / "usage.jsonl"
-DEFAULT_MODEL = os.environ.get("GCODE_MODEL", "gpt-5")
+DEFAULT_MODEL = os.environ.get("GCODE_MODEL", "gpt-5.4")
 MAX_OUTPUT_CHARS = 20000
 
-# USD per 1M tokens (input, output). Edit when OpenAI changes prices, or
-# override the whole table with GCODE_PRICES='{"my-model":[1.0,2.0]}'.
+# USD per 1M tokens: (input, cached input, output).
+# Source: https://developers.openai.com/api/docs/pricing, checked 2026-08-18.
+# Update when OpenAI changes prices, or override without editing code:
+#   GCODE_PRICES='{"gpt-5.6-sol":[3.0,0.3,20.0]}'
 PRICES = {
-    "gpt-5": (1.25, 10.00),
-    "gpt-5-mini": (0.25, 2.00),
-    "gpt-5-nano": (0.05, 0.40),
-    "gpt-4.1": (2.00, 8.00),
-    "gpt-4.1-mini": (0.40, 1.60),
-    "gpt-4o": (2.50, 10.00),
-    "gpt-4o-mini": (0.15, 0.60),
-    "o4-mini": (1.10, 4.40),
+    "gpt-5.5": (5.00, 0.50, 30.00),
+    "gpt-5.4": (2.50, 0.25, 15.00),
+    "gpt-5.4-mini": (0.75, 0.075, 4.50),
+    "gpt-5.4-nano": (0.20, 0.02, 1.25),
+    "gpt-5.3-codex": (1.75, 0.175, 14.00),
+    "gpt-5.2": (1.75, 0.175, 14.00),
+    "gpt-5.1": (1.25, 0.125, 10.00),
+    "gpt-5": (1.25, 0.125, 10.00),
+    "gpt-5-mini": (0.25, 0.025, 2.00),
+    "gpt-5-nano": (0.05, 0.005, 0.40),
+    "gpt-4.1": (2.00, 0.50, 8.00),
+    "gpt-4.1-mini": (0.40, 0.10, 1.60),
+    "gpt-4o": (2.50, 1.25, 10.00),
+    "gpt-4o-mini": (0.15, 0.075, 0.60),
+    "o4-mini": (1.10, 0.275, 4.40),
 }
 PRICES.update(json.loads(os.environ.get("GCODE_PRICES", "{}")))
 
@@ -191,16 +201,32 @@ def run_tool(name, args, yolo):
         return "ERROR: %s: %s" % (type(e).__name__, e)
 
 
+_warned_models = set()
+
+
+def price_key(model):
+    """Longest matching family, but only on a '-' boundary.
+
+    Keeps gpt-5.6-luna from being priced as gpt-5 just because it starts with it.
+    """
+    for k in sorted(PRICES, key=len, reverse=True):
+        if model == k or model.startswith(k + "-"):
+            return k
+    return None
+
+
 def cost(model, usage):
-    key = next((k for k in sorted(PRICES, key=len, reverse=True)
-                if model.startswith(k)), None)
+    key = price_key(model)
     if not key:
+        if model not in _warned_models:
+            _warned_models.add(model)
+            print("  \033[33mno price listed for %s - logging $0. "
+                  "Add it to PRICES or set GCODE_PRICES.\033[0m" % model)
         return 0.0
-    pin, pout = PRICES[key]
+    pin, pcached, pout = PRICES[key]
     cached = getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", 0) or 0
     fresh = usage.prompt_tokens - cached
-    # ponytail: cached input billed at ~10%; close enough for a budget view.
-    return (fresh * pin + cached * pin * 0.1 + usage.completion_tokens * pout) / 1_000_000
+    return (fresh * pin + cached * pcached + usage.completion_tokens * pout) / 1_000_000
 
 
 def log_usage(model, usage, tag):
@@ -259,7 +285,15 @@ def agent_turn(client, model, messages, yolo, budget, spent):
     """Run one user turn to completion. Returns dollars spent this turn."""
     turn_cost = 0.0
     while True:
-        resp = client.chat.completions.create(model=model, messages=messages, tools=TOOLS)
+        try:
+            resp = client.chat.completions.create(model=model, messages=messages, tools=TOOLS)
+        except openai.APIError as e:
+            # One readable line, then back to the prompt. Never dump a traceback.
+            msg = getattr(getattr(e, "body", None), "get", lambda k: None)("message") or str(e)
+            print("\n\033[31mAPI error (%s): %s\033[0m" % (type(e).__name__, msg))
+            if "must be verified" in msg or "model_not_found" in msg:
+                print("Try another model: gcode --models   |   gcode -m gpt-5.4-mini")
+            return turn_cost
         turn_cost += log_usage(model, resp.usage, "chat")
         msg = resp.choices[0].message
         messages.append(msg.model_dump(exclude_none=True))
@@ -294,6 +328,8 @@ def main():
                     help="stop the turn after this many USD (0 = no limit)")
     ap.add_argument("--usage", nargs="?", const=30, type=int, metavar="DAYS",
                     help="show token spend and exit")
+    ap.add_argument("--models", action="store_true",
+                    help="list chat models your key can reach, with prices")
     args = ap.parse_args()
 
     if args.usage is not None:
@@ -310,6 +346,19 @@ def main():
             % (", ".join(str(p) for p in LOADED_ENV) or "none found"))
 
     client = OpenAI()
+
+    if args.models:
+        skip = ("audio", "realtime", "transcribe", "tts", "search", "image", "embedding")
+        for mid in sorted(m.id for m in client.models.list()):
+            if not mid.startswith(("gpt-", "o3", "o4")) or any(s in mid for s in skip):
+                continue
+            k = price_key(mid)
+            print("  %-34s %s" % (mid, "$%s/$%s per 1M in/out" % PRICES[k][::2] if k
+                                  else "price unknown"))
+        print("\n  Listed != usable: some models need org verification. "
+              "Current default: " + DEFAULT_MODEL)
+        return
+
     messages = [{"role": "system", "content": SYSTEM.format(
         cwd=pathlib.Path.cwd(), platform=sys.platform)}]
     spent = 0.0

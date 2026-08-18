@@ -44,21 +44,26 @@ def main():
     # shell tool reports exit codes
     assert "exit=0" in gcode.run_tool("run_shell", {"command": "echo ok"}, True)
 
-    # cost math: 1M in + 1M out on gpt-5 = 1.25 + 10.00
-    assert abs(gcode.cost("gpt-5", usage(1_000_000, 1_000_000)) - 11.25) < 1e-6
-    # longest prefix wins: gpt-5-mini is not gpt-5
-    assert abs(gcode.cost("gpt-5-mini-2026-01-01", usage(1_000_000, 0)) - 0.25) < 1e-6
-    # cached input is 10x cheaper
-    assert abs(gcode.cost("gpt-5", usage(1_000_000, 0, cached=1_000_000)) - 0.125) < 1e-6
+    # cost math: 1M in + 1M out on gpt-5.4 = 2.50 + 15.00
+    assert abs(gcode.cost("gpt-5.4", usage(1_000_000, 1_000_000)) - 17.50) < 1e-6
+    # longest match wins: gpt-5.4-mini is not gpt-5.4, dated snapshots resolve
+    assert abs(gcode.cost("gpt-5.4-mini-2026-03-17", usage(1_000_000, 0)) - 0.75) < 1e-6
+    assert abs(gcode.cost("gpt-5-mini", usage(1_000_000, 0)) - 0.25) < 1e-6
+    # cached input uses the family's own cached rate, not a flat 10%
+    assert abs(gcode.cost("gpt-4o", usage(1_000_000, 0, cached=1_000_000)) - 1.25) < 1e-6
+    assert abs(gcode.cost("gpt-5.4", usage(1_000_000, 0, cached=1_000_000)) - 0.25) < 1e-6
+    # matching only on a '-' boundary: gpt-5.6-luna must NOT be priced as gpt-5
+    assert gcode.price_key("gpt-5.6-luna") is None
+    assert gcode.price_key("gpt-5-2025-08-07") == "gpt-5"
     # unknown model costs 0 instead of crashing
     assert gcode.cost("some-future-model", usage(100, 100)) == 0.0
 
     # usage log is valid jsonl and totals up
     gcode.HOME = pathlib.Path(tmp) / "home"
     gcode.USAGE_LOG = gcode.HOME / "usage.jsonl"
-    gcode.log_usage("gpt-5", usage(1_000_000, 0), "test")
+    gcode.log_usage("gpt-5.4", usage(1_000_000, 0), "test")
     row = json.loads(gcode.USAGE_LOG.read_text().splitlines()[0])
-    assert row["usd"] == 1.25 and row["in"] == 1_000_000
+    assert row["usd"] == 2.5 and row["in"] == 1_000_000
 
     # .env parsing: quotes stripped, inline comments dropped, real env wins
     env = pathlib.Path(tmp) / ".env"

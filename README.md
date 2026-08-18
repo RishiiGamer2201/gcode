@@ -125,14 +125,19 @@ repo you want it to touch, not from your home folder.
 ## Usage
 
 ```bash
-gcode                       # chat mode
-gcode "fix the bug in x.py" # one-shot, exits when done
-gcode -m gpt-5-mini "..."   # cheaper model
-gcode --budget 0.25 "..."   # stop after $0.25
-gcode --yolo "..."          # no approval prompts (only in a git repo you can reset)
-gcode --usage               # spend, last 30 days
-gcode --usage 7             # spend, last 7 days
+gcode                        # chat mode
+gcode "fix the bug in x.py"  # one-shot, exits when done
+gcode -m gpt-5.4-mini "..."  # cheaper model
+gcode --models               # what your key can reach, with prices
+gcode --budget 0.25 "..."    # stop after $0.25
+gcode --yolo "..."           # no approval prompts (only in a git repo you can reset)
+gcode --usage                # spend, last 30 days
+gcode --usage 7              # spend, last 7 days
 ```
+
+Default model is `gpt-5.4`. Change it per run with `-m`, or permanently with `GCODE_MODEL`
+in your `.env`. Any model your key can reach works — it just has to support tool calling.
+Models not in the price table still run, they just log `$0` with a warning.
 
 In chat mode:
 
@@ -234,6 +239,31 @@ is reflected in the logged cost.
   pointing it at a private repo.
 
 ---
+
+## Troubleshooting
+
+**`'gcode' is not recognized`** — it was installed into a venv that isn't active. Install it
+globally (see Setup step 2), or run `python C:\path\to\gcode\gcode.py "..."`.
+
+**`OPENAI_API_KEY is not set`** after running `setx`** — `setx` only affects terminals opened
+*afterwards*. Open a new one, or use `$env:OPENAI_API_KEY = "sk-..."`, or put the key in
+`.env`. The error message lists which `.env` files were actually read.
+
+**`Your organization must be verified to use the model gpt-5`** — some models are gated
+behind org verification at
+[platform.openai.com/settings/organization/general](https://platform.openai.com/settings/organization/general)
+(takes ~15 min to propagate). Until then use one that isn't gated:
+
+```bash
+gcode --models          # see what's reachable
+gcode -m gpt-5.4 "..."
+```
+
+If your `.env` still says `GCODE_MODEL=gpt-5` it overrides the default — edit or delete that
+line.
+
+**Costs show as $0** — the model isn't in the `PRICES` table in [`gcode.py`](gcode.py). Add
+it, or `GCODE_PRICES='{"model-name":[input,cached,output]}'` (USD per 1M tokens).
 
 ## Development
 
