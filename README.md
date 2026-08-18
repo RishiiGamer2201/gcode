@@ -40,6 +40,18 @@ $0.0231 this run
 python --version    # Windows: py -3 --version
 ```
 
+### Quick setup (do this)
+
+```powershell
+git clone https://github.com/RishiiGamer2201/gcode.git
+cd gcode
+.\setup.ps1          # Windows       (macOS/Linux: bash setup.sh)
+```
+
+Then open `.env` and paste your OpenAI key in. Done — run `gcode` from any project folder.
+
+The rest of this section is the manual version and what each step is for.
+
 ### 2. Clone and install
 
 ```bash
@@ -146,6 +158,7 @@ In chat mode:
 | `/reset` | clear the conversation, keep the session |
 | `/cost` | spend so far this session |
 | `/usage` | full 30-day report |
+| `/model <name>` | switch model mid-session |
 | `/exit` | quit |
 
 ---
@@ -249,21 +262,24 @@ globally (see Setup step 2), or run `python C:\path\to\gcode\gcode.py "..."`.
 *afterwards*. Open a new one, or use `$env:OPENAI_API_KEY = "sk-..."`, or put the key in
 `.env`. The error message lists which `.env` files were actually read.
 
-**`Your organization must be verified to use the model gpt-5`** — some models are gated
-behind org verification at
+**`Your organization must be verified to use the model ...`** — some models are gated behind
+org verification at
 [platform.openai.com/settings/organization/general](https://platform.openai.com/settings/organization/general)
-(takes ~15 min to propagate). Until then use one that isn't gated:
-
-```bash
-gcode --models          # see what's reachable
-gcode -m gpt-5.4 "..."
-```
-
-If your `.env` still says `GCODE_MODEL=gpt-5` it overrides the default — edit or delete that
-line.
+(takes ~15 min to propagate). gcode handles this itself: it falls back to the next model in
+`FALLBACKS` and tells you which one it picked. To stop seeing the notice, set that model as
+`GCODE_MODEL` in your `.env`. `gcode --models` lists what your key can reach.
 
 **Costs show as $0** — the model isn't in the `PRICES` table in [`gcode.py`](gcode.py). Add
-it, or `GCODE_PRICES='{"model-name":[input,cached,output]}'` (USD per 1M tokens).
+it, or `GCODE_PRICES='{"model-name":[input,cached,output]}'` (USD per 1M tokens). gcode
+prints a warning the first time it sees an unpriced model, so this never happens silently.
+
+**Garbled `[90m` characters in output** — an old console without ANSI support. gcode enables
+ANSI mode on Windows and drops color when output isn't a terminal; if it still happens, set
+`NO_COLOR=1`.
+
+**The agent runs `ls` and it fails on Windows** — it's told which shell it has (`cmd.exe`
+via `COMSPEC`) and to use `dir`/`type`/`findstr`. If you'd rather it use bash, run gcode
+from Git Bash.
 
 ## Development
 

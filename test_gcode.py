@@ -52,9 +52,12 @@ def main():
     # cached input uses the family's own cached rate, not a flat 10%
     assert abs(gcode.cost("gpt-4o", usage(1_000_000, 0, cached=1_000_000)) - 1.25) < 1e-6
     assert abs(gcode.cost("gpt-5.4", usage(1_000_000, 0, cached=1_000_000)) - 0.25) < 1e-6
-    # matching only on a '-' boundary: gpt-5.6-luna must NOT be priced as gpt-5
-    assert gcode.price_key("gpt-5.6-luna") is None
+    # dated snapshots resolve to their base model
     assert gcode.price_key("gpt-5-2025-08-07") == "gpt-5"
+    # variants are NEVER priced from their parent: gpt-5.4-pro is 12x gpt-5.4
+    assert gcode.PRICES["gpt-5.4-pro"][0] > 10 * gcode.PRICES["gpt-5.4"][0]
+    assert gcode.price_key("gpt-5.4-turbo-imaginary") is None
+    assert gcode.price_key("gpt-4.1-frobnicate") is None
     # unknown model costs 0 instead of crashing
     assert gcode.cost("some-future-model", usage(100, 100)) == 0.0
 

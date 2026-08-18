@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -38,6 +39,24 @@ def load_dotenv(paths=ENV_FILES):
 LOADED_ENV = load_dotenv()
 
 
+if os.name == "nt":
+    os.system("")  # switches legacy Windows consoles into ANSI mode
+
+DIM, RED, YELLOW, BOLD = "90", "31", "33", "1"
+USE_COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+
+def c(text, code):
+    return "\033[%sm%s\033[0m" % (code, text) if USE_COLOR else text
+
+
+def shell_name():
+    """What run_shell actually spawns, so the model stops guessing."""
+    if os.name != "nt":
+        return os.environ.get("SHELL", "/bin/sh")
+    return os.environ.get("COMSPEC", "cmd.exe")
+
+
 def num_env(name, default=0.0):
     try:
         return float(os.environ.get(name) or default)
@@ -55,8 +74,18 @@ MAX_OUTPUT_CHARS = 20000
 # Update when OpenAI changes prices, or override without editing code:
 #   GCODE_PRICES='{"gpt-5.6-sol":[3.0,0.3,20.0]}'
 PRICES = {
+    "gpt-5.6-sol": (5.00, 0.50, 30.00),
+    "gpt-5.6-terra": (2.00, 0.20, 12.00),
+    "gpt-5.6-luna": (0.20, 0.02, 1.20),
     "gpt-5.5": (5.00, 0.50, 30.00),
+    "gpt-5.5-pro": (30.00, 30.00, 180.00),
     "gpt-5.4": (2.50, 0.25, 15.00),
+    "gpt-5.4-pro": (30.00, 30.00, 180.00),
+    "gpt-5.2-pro": (21.00, 21.00, 168.00),
+    "gpt-5-pro": (15.00, 15.00, 120.00),
+    "gpt-4.1-nano": (0.10, 0.025, 0.40),
+    "o3": (2.00, 0.50, 8.00),
+    "o3-mini": (1.10, 0.55, 4.40),
     "gpt-5.4-mini": (0.75, 0.075, 4.50),
     "gpt-5.4-nano": (0.20, 0.02, 1.25),
     "gpt-5.3-codex": (1.75, 0.175, 14.00),
@@ -71,18 +100,24 @@ PRICES = {
     "gpt-4o-mini": (0.15, 0.075, 0.60),
     "o4-mini": (1.10, 0.275, 4.40),
 }
+
+# Tried in order when the chosen model is gated behind org verification.
+FALLBACKS = ["gpt-5.4", "gpt-5.4-mini", "gpt-4.1", "gpt-4o-mini"]
 PRICES.update(json.loads(os.environ.get("GCODE_PRICES", "{}")))
 
 SYSTEM = """You are gcode, a coding agent running in the user's terminal.
 
 Working directory: {cwd}
 Platform: {platform}
+run_shell executes commands through: {shell}
 
 Rules:
 - Use the tools to read real files before you edit them. Never guess file contents.
 - Prefer edit_file (exact string replace) over rewriting a whole file.
 - Keep changes minimal and match the surrounding code style.
 - Run tests/build commands with run_shell when it helps verify your work.
+- Write shell commands for the shell named above. On cmd.exe use dir/type/findstr,
+  not ls/cat/grep, and use backslash paths.
 - When done, reply with a short summary. No essays.
 """
 
@@ -205,14 +240,16 @@ _warned_models = set()
 
 
 def price_key(model):
-    """Longest matching family, but only on a '-' boundary.
+    """Exact model id, or a dated snapshot of one. Nothing else.
 
-    Keeps gpt-5.6-luna from being priced as gpt-5 just because it starts with it.
+    Prefix matching is tempting and wrong: gpt-5.4-pro is $30/$180 while gpt-5.4
+    is $2.50/$15, so 'starts with gpt-5.4' would under-report by 12x. An unlisted
+    variant reports $0 with a warning, which is at least visibly wrong.
     """
-    for k in sorted(PRICES, key=len, reverse=True):
-        if model == k or model.startswith(k + "-"):
-            return k
-    return None
+    if model in PRICES:
+        return model
+    base = re.sub(r"-\d{4}-\d{2}-\d{2}$", "", model)
+    return base if base in PRICES else None
 
 
 def cost(model, usage):
@@ -220,8 +257,8 @@ def cost(model, usage):
     if not key:
         if model not in _warned_models:
             _warned_models.add(model)
-            print("  \033[33mno price listed for %s - logging $0. "
-                  "Add it to PRICES or set GCODE_PRICES.\033[0m" % model)
+            print(c("  no price listed for %s - logging $0. "
+                    "Add it to PRICES or set GCODE_PRICES." % model, YELLOW))
         return 0.0
     pin, pcached, pout = PRICES[key]
     cached = getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", 0) or 0
@@ -281,20 +318,39 @@ def show_usage(days):
     print("  log: " + str(USAGE_LOG))
 
 
-def agent_turn(client, model, messages, yolo, budget, spent):
+def api_error_message(e):
+    body = getattr(e, "body", None)
+    if isinstance(body, dict):
+        return str(body.get("message") or body.get("error", {}).get("message") or e)
+    return str(e)
+
+
+def agent_turn(client, args, messages, spent):
     """Run one user turn to completion. Returns dollars spent this turn."""
     turn_cost = 0.0
+    budget = args.budget
     while True:
         try:
-            resp = client.chat.completions.create(model=model, messages=messages, tools=TOOLS)
+            resp = client.chat.completions.create(
+                model=args.model, messages=messages, tools=TOOLS)
         except openai.APIError as e:
             # One readable line, then back to the prompt. Never dump a traceback.
-            msg = getattr(getattr(e, "body", None), "get", lambda k: None)("message") or str(e)
-            print("\n\033[31mAPI error (%s): %s\033[0m" % (type(e).__name__, msg))
-            if "must be verified" in msg or "model_not_found" in msg:
-                print("Try another model: gcode --models   |   gcode -m gpt-5.4-mini")
+            msg = api_error_message(e)
+            blocked = "must be verified" in msg or "model_not_found" in msg or \
+                      "does not exist" in msg
+            nxt = next((m for m in FALLBACKS if m != args.model), None) if blocked else None
+            if nxt:
+                print(c("\n%s is not available on this key. Falling back to %s.\n"
+                        "  (set GCODE_MODEL=%s in your .env to make it stick)"
+                        % (args.model, nxt, nxt), YELLOW))
+                FALLBACKS.remove(nxt)
+                args.model = nxt
+                continue
+            print(c("\nAPI error (%s): %s" % (type(e).__name__, msg), RED))
+            if blocked:
+                print("Nothing left to fall back to. Run: gcode --models")
             return turn_cost
-        turn_cost += log_usage(model, resp.usage, "chat")
+        turn_cost += log_usage(args.model, resp.usage, "chat")
         msg = resp.choices[0].message
         messages.append(msg.model_dump(exclude_none=True))
 
@@ -305,10 +361,9 @@ def agent_turn(client, model, messages, yolo, budget, spent):
             return turn_cost
 
         for tc in msg.tool_calls:
-            args = json.loads(tc.function.arguments or "{}")
-            print("  \033[90m* %s %s\033[0m" % (tc.function.name,
-                                                json.dumps(args)[:120]))
-            result = run_tool(tc.function.name, args, yolo)
+            targs = json.loads(tc.function.arguments or "{}")
+            print(c("  * %s %s" % (tc.function.name, json.dumps(targs)[:120]), DIM))
+            result = run_tool(tc.function.name, targs, args.yolo)
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
 
         if budget and spent + turn_cost >= budget:
@@ -348,32 +403,40 @@ def main():
     client = OpenAI()
 
     if args.models:
-        skip = ("audio", "realtime", "transcribe", "tts", "search", "image", "embedding")
+        skip = ("audio", "realtime", "transcribe", "tts", "search", "image",
+                "embedding", "3.5", "instruct", "chat-latest")
+        names = []
         for mid in sorted(m.id for m in client.models.list()):
             if not mid.startswith(("gpt-", "o3", "o4")) or any(s in mid for s in skip):
                 continue
+            if re.search(r"-\d{4}-\d{2}-\d{2}$", mid):  # dated snapshot of a base model
+                continue
+            names.append(mid)
+        priced = [n for n in names if price_key(n)]
+        for mid in priced + [n for n in names if n not in priced]:
             k = price_key(mid)
-            print("  %-34s %s" % (mid, "$%s/$%s per 1M in/out" % PRICES[k][::2] if k
-                                  else "price unknown"))
-        print("\n  Listed != usable: some models need org verification. "
-              "Current default: " + DEFAULT_MODEL)
+            print("  %-26s %s" % (mid, "$%-6s in  $%-6s out  per 1M tokens"
+                                  % PRICES[k][::2] if k else "price unknown"))
+        print("\n  Default: %s. Listing a model does not mean your key can call it -\n"
+              "  some need org verification; gcode falls back automatically if so."
+              % DEFAULT_MODEL)
         return
 
     messages = [{"role": "system", "content": SYSTEM.format(
-        cwd=pathlib.Path.cwd(), platform=sys.platform)}]
+        cwd=pathlib.Path.cwd(), platform=sys.platform, shell=shell_name())}]
     spent = 0.0
 
     if args.prompt:
         messages.append({"role": "user", "content": " ".join(args.prompt)})
-        spent += agent_turn(client, args.model, messages, args.yolo, args.budget, spent)
-        print("\033[90m$%.4f this run\033[0m" % spent)
+        spent += agent_turn(client, args, messages, spent)
+        print(c("$%.4f this run" % spent, DIM))
         return
 
     print("gcode | %s | %s" % (args.model, pathlib.Path.cwd()))
-    print("/exit  /reset  /cost  /usage\n")
+    print(c("/exit  /reset  /cost  /usage  /model <name>", DIM) + "\n")
     while True:
         try:
-            line = input("\033[1myou>\033[0m ").strip()
+            line = input(c("you>", BOLD) + " ").strip()
         except (EOFError, KeyboardInterrupt):
             break
         if not line:
@@ -390,13 +453,19 @@ def main():
         if line == "/usage":
             show_usage(30)
             continue
+        if line.startswith("/model"):
+            parts = line.split()
+            if len(parts) > 1:
+                args.model = parts[1]
+            print("model: %s\n" % args.model)
+            continue
 
         messages.append({"role": "user", "content": line})
         try:
-            spent += agent_turn(client, args.model, messages, args.yolo, args.budget, spent)
+            spent += agent_turn(client, args, messages, spent)
         except KeyboardInterrupt:
             print("\n[interrupted]\n")
-        print("\033[90m$%.4f session\033[0m\n" % spent)
+        print(c("$%.4f session" % spent, DIM) + "\n")
 
     print("\n$%.4f this session. Run `gcode --usage` for the full log." % spent)
 
