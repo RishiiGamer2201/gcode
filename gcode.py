@@ -13,6 +13,37 @@ import time
 
 from openai import OpenAI
 
+ENV_FILES = [pathlib.Path.cwd() / ".env", pathlib.Path(__file__).resolve().parent / ".env"]
+
+
+def load_dotenv(paths=ENV_FILES):
+    """Read KEY=VALUE lines from .env files. Real env vars always win."""
+    loaded = []
+    for path in paths:
+        if not path.is_file():
+            continue
+        loaded.append(path)
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            val = val.split(" #")[0].strip().strip("\"'")  # drop trailing comments
+            if val:
+                os.environ.setdefault(key.strip(), val)
+    return loaded
+
+
+LOADED_ENV = load_dotenv()
+
+
+def num_env(name, default=0.0):
+    try:
+        return float(os.environ.get(name) or default)
+    except ValueError:
+        return default
+
+
 HOME = pathlib.Path(os.environ.get("GCODE_HOME", pathlib.Path.home() / ".gcode"))
 USAGE_LOG = HOME / "usage.jsonl"
 DEFAULT_MODEL = os.environ.get("GCODE_MODEL", "gpt-5")
@@ -259,7 +290,7 @@ def main():
     ap.add_argument("-m", "--model", default=DEFAULT_MODEL)
     ap.add_argument("--yolo", action="store_true",
                     help="skip approval prompts for writes and shell commands")
-    ap.add_argument("--budget", type=float, default=float(os.environ.get("GCODE_BUDGET", 0)),
+    ap.add_argument("--budget", type=float, default=num_env("GCODE_BUDGET"),
                     help="stop the turn after this many USD (0 = no limit)")
     ap.add_argument("--usage", nargs="?", const=30, type=int, metavar="DAYS",
                     help="show token spend and exit")
@@ -269,8 +300,14 @@ def main():
         show_usage(args.usage)
         return
 
-    if not os.environ.get("OPENAI_API_KEY"):
-        sys.exit("OPENAI_API_KEY is not set. See the README.")
+    key = os.environ.get("OPENAI_API_KEY", "")
+    if not key or key.endswith("..."):
+        sys.exit(
+            "OPENAI_API_KEY is not set.\n"
+            "  .env files checked: %s\n"
+            "  Fix: put OPENAI_API_KEY=sk-... in a .env next to gcode.py or in this folder,\n"
+            "  or run:  $env:OPENAI_API_KEY = \"sk-...\"   (PowerShell, this session only)"
+            % (", ".join(str(p) for p in LOADED_ENV) or "none found"))
 
     client = OpenAI()
     messages = [{"role": "system", "content": SYSTEM.format(

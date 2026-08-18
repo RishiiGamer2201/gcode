@@ -28,6 +28,7 @@ $0.0231 this run
 | Cost tracking | every API call logged to `~/.gcode/usage.jsonl` with tokens, USD, model, user, project |
 | Budget | `--budget 0.50` stops the agent mid-task once it has spent $0.50 |
 | Modes | interactive chat, or one-shot `gcode "do the thing"` |
+| Config | `.env` auto-loaded from the current folder, then from the install folder |
 
 ---
 
@@ -42,57 +43,71 @@ python --version    # Windows: py -3 --version
 ### 2. Clone and install
 
 ```bash
-git clone <repo-url> gcode
+git clone https://github.com/RishiiGamer2201/gcode.git
 cd gcode
-
-python -m venv .venv
-# macOS/Linux
-source .venv/bin/activate
-# Windows PowerShell
-.venv\Scripts\Activate.ps1
-
 pip install -e .
 ```
 
-`pip install -e .` puts a `gcode` command on your PATH (inside the venv) and installs the
-`openai` package. Verify:
+That puts a `gcode` command on your PATH and installs the `openai` package.
+
+**Install it globally, not in a venv.** You want to run `gcode` inside *other* projects, and
+a venv-installed command only exists while that venv is active. Options, best first:
 
 ```bash
+pipx install -e .          # isolated, still on PATH everywhere  (pip install pipx)
+pip install -e .           # into your main/base Python — simplest
+```
+
+`-e` (editable) means `git pull` updates your install; no reinstall needed.
+
+Verify from some *other* folder:
+
+```bash
+cd ~/some/other/project
 gcode --usage
 # -> no usage logged yet: C:\Users\you\.gcode\usage.jsonl
 ```
 
-Not installing? Run it directly instead: `python gcode.py "your prompt"`.
+If `gcode` is "not recognized", you installed it into a venv that isn't active. Either
+activate it, or reinstall globally as above. Fallback that always works:
+`python C:\path\to\gcode\gcode.py "your prompt"`.
 
 ### 3. Set the API key
 
 The key is the one thing that is **not** in this repo. Get it from whoever owns the OpenAI
-account, then set it as an environment variable.
-
-**macOS / Linux** — add to `~/.bashrc` or `~/.zshrc`:
+account. Easiest way — a `.env` file, which gcode loads automatically:
 
 ```bash
+cp .env.example .env
+```
+
+Then edit `.env` and put the real key in. gcode looks for `.env` in two places:
+
+1. the folder you run `gcode` from — per-project overrides
+2. the folder `gcode.py` lives in — your global default
+
+Never commit it; `.gitignore` already excludes `.env`.
+
+Environment variables also work and **override** `.env`:
+
+```bash
+# macOS / Linux — add to ~/.bashrc or ~/.zshrc
 export OPENAI_API_KEY="sk-proj-..."
 export GCODE_USER="your-name"      # so the team log knows whose spend is whose
 ```
 
-**Windows PowerShell** — permanent, one time:
-
 ```powershell
+# Windows PowerShell — this session only
+$env:OPENAI_API_KEY = "sk-proj-..."
+
+# Windows PowerShell — permanent
 setx OPENAI_API_KEY "sk-proj-..."
 setx GCODE_USER "your-name"
 ```
 
-Then open a new terminal (`setx` only affects new sessions).
-
-**Or use a `.env` file** (never commit it — `.gitignore` already excludes it):
-
-```bash
-cp .env.example .env    # fill in the key
-```
-
-`.env` is not auto-loaded; source it yourself (`set -a; . ./.env; set +a`) or export the
-variables as above.
+`setx` writes to the registry for *future* processes — the shell you typed it in still won't
+see it. Open a new terminal after `setx`, or use `$env:` for the current one. `export` is
+bash syntax and does not exist in PowerShell.
 
 ### 4. Run it
 

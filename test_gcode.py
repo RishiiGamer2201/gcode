@@ -60,6 +60,19 @@ def main():
     row = json.loads(gcode.USAGE_LOG.read_text().splitlines()[0])
     assert row["usd"] == 1.25 and row["in"] == 1_000_000
 
+    # .env parsing: quotes stripped, inline comments dropped, real env wins
+    env = pathlib.Path(tmp) / ".env"
+    env.write_text('# comment\nGC_A="v1"\nGC_B=v2   # trailing note\nGC_C=0   # cap\n'
+                   "GC_TAKEN=from_file\nbroken line\n")
+    os.environ["GC_TAKEN"] = "from_shell"
+    assert gcode.load_dotenv([env]) == [env]
+    assert os.environ["GC_A"] == "v1"
+    assert os.environ["GC_B"] == "v2"
+    assert os.environ["GC_TAKEN"] == "from_shell"
+    assert gcode.num_env("GC_C") == 0.0
+    assert gcode.num_env("GC_B", 5) == 5  # unparseable falls back, no crash
+    assert gcode.num_env("GC_MISSING", 3) == 3
+
     print("all checks passed")
 
 
